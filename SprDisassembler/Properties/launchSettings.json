@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "SprDisassembler": {
+      "commandName": "Project",
+      "commandLineArgs": "test.smc 0x00F5F3 output.asm"
+    }
+  }
+}

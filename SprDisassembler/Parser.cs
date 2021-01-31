@@ -1,8 +1,12 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Text;
 
 namespace SprDisassembler {
+    /// <summary>
+    /// Enum that represents the state of the processor flags during exploration of the entrypoint
+    /// </summary>
     [Flags]
     public enum ProcessorFlags : byte {
         // nvmxdizc
@@ -16,32 +20,106 @@ namespace SprDisassembler {
         N = 0x80
     }
 
+    public enum RegisterType {
+        A,
+        X,
+        Y,
+        S,
+        DB,
+        DP,
+        PB,
+        P,
+        PC
+    }
+
+    public class Register {
+        string Name { get => RegType.ToString(); }
+        RegisterType RegType { get; set; }
+        ushort Value;
+        public Register(RegisterType type) {
+            RegType = type;
+            Value = 0;
+        }
+
+        public void UpdateValue(ushort newvalue, bool length) {
+            if (length)
+                Value = newvalue;
+            else {
+                Value &= 0xFF00;
+                Value |= (ushort)(newvalue & 0xFF);
+            }
+        }
+
+        public ushort GetValue(bool length) {
+            if (length)
+                return Value;
+            else
+                return (ushort)(Value & 0xFF);
+        }
+    }
+
+    /// <summary>
+    /// Extension methods for the ProcessorFlags enum
+    /// </summary>
     public static class FlagsExtensions {
 
+        /// <summary>
+        /// Checks if specified Flags(s) is/are set.
+        /// </summary>
+        /// <param name="flags"> Instance to check </param>
+        /// <param name="other"> Flags to check if they are set</param>
+        /// <returns>true if flag(s) is/are set, false otherwise</returns>
         public static bool IsFlagSet(this ProcessorFlags flags, ProcessorFlags other) {
             return (flags & other) != 0;
         }
-
+        /// <summary>
+        /// Sets specified flag(s)
+        /// </summary>
+        /// <param name="flags"> Instance to set </param>
+        /// <param name="other"> Flag(s) to set </param>
+        /// <returns> new instance with specified flag set </returns>
         public static ProcessorFlags SetFlag(this ProcessorFlags flags, ProcessorFlags other) {
             flags |= other;
             return flags;
         }
-
+        /// <summary>
+        /// Unsets specified flag(s)
+        /// </summary>
+        /// <param name="flags"> Instance to unset </param>
+        /// <param name="other"> Flag(s) to set </param>
+        /// <returns> new instance with specified flags unset </returns>
         public static ProcessorFlags UnSetFlag(this ProcessorFlags flags, ProcessorFlags other) {
             flags &= ((ProcessorFlags)0xFF ^ other);
             return flags;
         }
-
+        /// <summary>
+        /// Inverts specified flag(s)
+        /// </summary>
+        /// <param name="flags"> Instance to invert </param>
+        /// <param name="other"> Flag(s) to invert </param>
+        /// <returns> new instnace with specified flags inverted </returns>
         public static ProcessorFlags InvertFlag(this ProcessorFlags flags, ProcessorFlags other) {
             flags ^= other;
             return flags;
         }
 
+        public static string FlagsToString(this ProcessorFlags flags, bool prependName = true) {
+            string repr = prependName ? "Processor flags: " : "";
+            char[] arr = new char[8];
+            int i = 0;
+            foreach (var type in (ProcessorFlags[])Enum.GetValues(typeof(ProcessorFlags))) {
+                arr[i] = flags.IsFlagSet(type) ? type.ToString().ToUpper()[0] : type.ToString().ToLower()[0];
+                i++;
+            }
+            Array.Reverse(arr);
+            return repr + new string(arr);
+        }
+
 
     }
     class Parser {
-
-        // TODO: finish opcode list
+        private int _pc;
+        private ProcessorFlags _flags = ProcessorFlags.M | ProcessorFlags.X;
         public static List<Opcode> Opcodes = new List<Opcode>() {
             new Opcode(2, AddressingMode.Immediate, 0x00, "BRK"), // BRK #$xx
             new Opcode(2, AddressingMode.DirectIndexedIndirect, 0x01, "ORA"), // ORA ($xx,x)
@@ -52,35 +130,327 @@ namespace SprDisassembler {
             new Opcode(2, AddressingMode.Direct, 0x06, "ASL"), // ASL $xx
             new Opcode(2, AddressingMode.DirectIndirectLong, 0x07, "ORA"), // ORA [$xx]
             new Opcode(1, AddressingMode.Implied, 0x08, "PHP"), // PHP
-            new Opcode(3, AddressingMode.ImmediateLong, 0x09, "ORA"), // ORA #$xxxx
+            new Opcode(3, AddressingMode.Immediate, 0x09, "ORA"), // ORA #$xxxx | ORA #$xx
             new Opcode(1, AddressingMode.ImpliedAccumulator, 0x0A, "ASL"), // ASL A
             new Opcode(1, AddressingMode.Implied, 0x0B, "PHD"), // PHD
             new Opcode(3, AddressingMode.Absolute, 0x0C, "TSB"), // TSB $xxxx
             new Opcode(3, AddressingMode.Absolute, 0x0D, "ORA"), // ORA $xxxx
             new Opcode(3, AddressingMode.Absolute, 0x0E, "ASL"), // ASL $xxxx
-            new Opcode(4, AddressingMode.AbsoluteLong, 0x0F, "ORA") // ORA $xxxxxx
+            new Opcode(4, AddressingMode.AbsoluteLong, 0x0F, "ORA"), // ORA $xxxxxx
+            new Opcode(2, AddressingMode.Relative, 0x10, "BPL"), // BPL $xx
+            new Opcode(2, AddressingMode.DirectIndirectIndexed, 0x11, "ORA"), // ORA ($xx),y
+            new Opcode(2, AddressingMode.DirectIndirect, 0x12, "ORA"), // ORA ($xx)
+            new Opcode(2, AddressingMode.StackRelativeIndirectIndexed, 0x13, "ORA"), // ORA ($xx,s),y
+            new Opcode(2, AddressingMode.Direct, 0x14, "TRB"), // TRB $xx
+            new Opcode(2, AddressingMode.DirectIndexedX, 0x15, "ORA"), // ORA $xx,x
+            new Opcode(2, AddressingMode.DirectIndexedX, 0x16, "ASL"), // ASL $xx,x
+            new Opcode(2, AddressingMode.DirectIndirectIndexedLong, 0x17, "ORA"), // ORA [$xx],y
+            new Opcode(1, AddressingMode.Implied, 0x18, "CLC"), // CLC
+            new Opcode(3, AddressingMode.AbsoluteIndexedY, 0x19, "ORA"), // ORA $xxxx,y
+            new Opcode(1, AddressingMode.ImpliedAccumulator, 0x1A, "INC"), // INC A
+            new Opcode(1, AddressingMode.Implied, 0x1B, "TCS"), // TCS
+            new Opcode(3, AddressingMode.Absolute, 0x1C, "TRB" ), // TRB $xxxx
+            new Opcode(3, AddressingMode.AbsoluteIndexedX, 0x1D, "ORA"), // ORA $xxxx,x
+            new Opcode(3, AddressingMode.AbsoluteIndexedX, 0x1E, "ASL"), // ASL $xxxx,x
+            new Opcode(4, AddressingMode.AbsoluteIndexedLong, 0x1F, "ORA"), // ORA $xxxxxx,x
+            new Opcode(3, AddressingMode.Absolute, 0x20, "JSR"), // JSR $xxxx
+            new Opcode(2, AddressingMode.DirectIndexedIndirect, 0x21, "AND"), // AND ($xx,x)
+            new Opcode(4, AddressingMode.AbsoluteLong, 0x22, "JSL"), // JSL $xxxxxx
+            new Opcode(2, AddressingMode.StackRelative, 0x23, "AND"), // AND $xx,s
+            new Opcode(2, AddressingMode.Direct, 0x24, "BIT"), // BIT $xx
+            new Opcode(2, AddressingMode.Direct, 0x25, "AND"), // AND $xx
+            new Opcode(2, AddressingMode.Direct, 0x26, "ROL"), // ROL $xx
+            new Opcode(2, AddressingMode.DirectIndirectLong, 0x27, "AND"), // AND [$xx]
+            new Opcode(2, AddressingMode.Implied, 0x28, "PLP"), // PLP
+            new Opcode(3, AddressingMode.Immediate, 0x29, "AND"), // AND #$xxxx | AND #$xx
+            new Opcode(1, AddressingMode.ImpliedAccumulator, 0x2A, "ROL"), // ROL A
+            new Opcode(1, AddressingMode.Implied, 0x2B, "PLD"), // PLD
+            new Opcode(3, AddressingMode.Absolute, 0x2C, "BIT"), // BIT
+            new Opcode(3, AddressingMode.Absolute, 0x2D, "AND"), // AND $xxxx
+            new Opcode(3, AddressingMode.Absolute, 0x2E, "ROL"), // ROL $xxxx
+            new Opcode(4, AddressingMode.AbsoluteLong, 0x2F, "AND"), // AND $xxxxxx
+            new Opcode(2, AddressingMode.Relative, 0x30, "BMI"), // BMI $xx
+            new Opcode(2, AddressingMode.DirectIndirectIndexed, 0x31, "AND"), // AND ($xx),y
+            new Opcode(2, AddressingMode.DirectIndirect, 0x32, "AND"), // AND ($xx)
+            new Opcode(2, AddressingMode.StackRelativeIndirectIndexed, 0x33, "AND"), // AND ($xx,s),y
+            new Opcode(2, AddressingMode.DirectIndexedX, 0x34, "BIT"), // BIT $xx,x
+            new Opcode(2, AddressingMode.DirectIndexedX ,0x35, "AND"), // AND $xx,x
+            new Opcode(2, AddressingMode.DirectIndexedX ,0x36, "ROL"), // ROL $xx,x
+            new Opcode(2, AddressingMode.DirectIndirectIndexedLong, 0x37, "AND"), // AND [$xx],y
+            new Opcode(1, AddressingMode.Implied, 0x38, "SEC"), // SEC
+            new Opcode(3, AddressingMode.AbsoluteIndexedX, 0x39, "AND"), // AND $xxxx,y
+            new Opcode(1, AddressingMode.ImpliedAccumulator, 0x3A, "DEC" ), // DEC A 
+            new Opcode(1, AddressingMode.Implied, 0x3B, "TSC" ), // TSC
+            new Opcode(3, AddressingMode.AbsoluteIndexedX, 0x3C, "BIT"), // BIT $xxxx,x
+            new Opcode(3, AddressingMode.AbsoluteIndexedX, 0x3D, "AND"), // AND $xxxx,x
+            new Opcode(3, AddressingMode.AbsoluteIndexedX, 0x3E, "ROL"), // ROL $xxxx,x
+            new Opcode(4, AddressingMode.AbsoluteIndexedLong, 0x3F, "AND"), // AND $xxxxxx,x
+            new Opcode(1, AddressingMode.Implied, 0x40, "RTI" ), // RTI
+            new Opcode(2, AddressingMode.DirectIndexedIndirect, 0x41, "EOR"), // EOR ($xx,x)
+            new Opcode(2, AddressingMode.Immediate, 0x42, "WDM"), // WDM #$xx
+            new Opcode(2, AddressingMode.StackRelative, 0x43, "EOR"), // EOR $xx,s
+            new Opcode(3, AddressingMode.BlockMove, 0x44, "MVP"), // MVP $xx,$xx
+            new Opcode(2, AddressingMode.Direct, 0x45, "EOR"), // EOR $xx
+            new Opcode(2, AddressingMode.Direct, 0x46, "LSR"), // LSR $xx
+            new Opcode(2, AddressingMode.DirectIndirectLong, 0x47, "EOR"), // EOR [$xx]
+            new Opcode(1, AddressingMode.Implied, 0x48, "PHA"), // PHA
+            new Opcode(3, AddressingMode.Immediate, 0x49, "EOR"), // EOR #$xxxx | EOR #$xx
+            new Opcode(1, AddressingMode.ImpliedAccumulator, 0x4A, "LSR"), // LSR A
+            new Opcode(1, AddressingMode.Implied, 0x4B, "PHK"), // PHK
+            new Opcode(3, AddressingMode.Absolute, 0x4C, "JMP"), // JMP $xxxx
+            new Opcode(3, AddressingMode.Absolute, 0x4D, "EOR"), // EOR $xxxx
+            new Opcode(3, AddressingMode.Absolute, 0x4E, "LSR"), // LSR $xxxx
+            new Opcode(4, AddressingMode.AbsoluteLong, 0x4F, "EOR"), // EOR $xxxxxx
+            new Opcode(2, AddressingMode.Relative, 0x50, "BVC"), // EOR $xx
+            new Opcode(2, AddressingMode.DirectIndirectIndexed, 0x51, "EOR"), // EOR ($xx),y
+            new Opcode(2, AddressingMode.DirectIndirect, 0x52, "EOR"), // EOR ($xx)
+            new Opcode(2, AddressingMode.StackRelativeIndirectIndexed, 0x53, "EOR"), // EOR ($xx,s),y
+            new Opcode(3, AddressingMode.BlockMove, 0x54, "MVN"), // MVN $xx,$xx
+            new Opcode(2, AddressingMode.DirectIndexedX, 0x55, "EOR"), // EOR $xx,x
+            new Opcode(2, AddressingMode.DirectIndexedX, 0x56, "LSR"), // LSR $xx,x
+            new Opcode(2, AddressingMode.DirectIndirectIndexedLong, 0x57, "EOR"), // EOR [$xx],y
+            new Opcode(1, AddressingMode.Implied, 0x58, "CLI"), // CLI
+            new Opcode(3, AddressingMode.AbsoluteIndexedY, 0x59, "EOR"), // EOR $xxxx,y
+            new Opcode(1, AddressingMode.Implied, 0x5A, "PHY"), // PHY
+            new Opcode(1, AddressingMode.Implied, 0x5B, "TCD"), // TCD
+            new Opcode(4, AddressingMode.AbsoluteLong, 0x5C, "JML" ), // JML $xxxxxx
+            new Opcode(3, AddressingMode.AbsoluteIndexedX, 0x5D, "EOR"), // EOR $xxxx,x
+            new Opcode(3, AddressingMode.AbsoluteIndexedX, 0x5E, "LSR"), // LSR $xxxx,x
+            new Opcode(4, AddressingMode.AbsoluteIndexedLong, 0x5F, "EOR"), // EOR $xxxxxx,x
+            new Opcode(1, AddressingMode.Implied, 0x60, "RTS"),
+            new Opcode(2, AddressingMode.DirectIndexedIndirect, 0x61, "ADC"), // ADC ($xx,x)
+            new Opcode(3, AddressingMode.Absolute, 0x62, "PER"), // PER $xxxx
+            new Opcode(2, AddressingMode.StackRelative, 0x63, "ADC"), // ADC $xx,s
+            new Opcode(2, AddressingMode.Direct, 0x64, "STZ"), // STZ $xx
+            new Opcode(2, AddressingMode.Direct, 0x65, "ADC"), // ADC $xx
+            new Opcode(2, AddressingMode.Direct, 0x66, "ROR"), // ROR $xx
+            new Opcode(2, AddressingMode.DirectIndirectLong, 0x67, "ADC"), // ADC [$xx]
+            new Opcode(1, AddressingMode.Implied, 0x68, "PLA"), // PLA
+            new Opcode(3, AddressingMode.Immediate, 0x69, "ADC"), // ADC #$xxxx
+            new Opcode(1, AddressingMode.ImpliedAccumulator, 0x6A, "ROR"), // ROR A
+            new Opcode(1, AddressingMode.Implied, 0x6B, "RTL"), // RTL
+            new Opcode(3, AddressingMode.AbsoluteIndirect, 0x6C, "JMP"), // JMP ($xxxx)
+            new Opcode(3, AddressingMode.Absolute, 0x6D, "ADC"), // ADC $xxxx
+            new Opcode(3, AddressingMode.Absolute, 0x6E, "ROR"), // ROR
+            new Opcode(4, AddressingMode.AbsoluteLong, 0x6F, "ADC"), // ADC $xxxxxx
+            new Opcode(2, AddressingMode.Relative, 0x70, "BVS"), // BVS $xx
+            new Opcode(2, AddressingMode.DirectIndirectIndexed, 0x71, "ADC"), // ADC ($xx),y
+            new Opcode(2, AddressingMode.DirectIndirect, 0x72, "ADC"), // ADC ($xx)
+            new Opcode(2, AddressingMode.StackRelativeIndirectIndexed, 0x73, "ADC"), // ADC ($xx,s),y
+            new Opcode(2, AddressingMode.DirectIndexedX, 0x74, "STZ"), // STZ $xx,x
+            new Opcode(2, AddressingMode.DirectIndexedX, 0x75, "ADC"), // ADC $xx,x
+            new Opcode(2, AddressingMode.DirectIndexedX, 0x76, "ROR"), // ROR $xx,x
+            new Opcode(2, AddressingMode.DirectIndirectIndexedLong, 0x77, "ADC"), // ADC [$xx],y
+            new Opcode(1, AddressingMode.Implied, 0x78, "SEI"), // SEI
+            new Opcode(3, AddressingMode.AbsoluteIndexedY, 0x79, "ADC"), // ADC $xxxx,y
+            new Opcode(1, AddressingMode.Implied, 0x7A, "PLY"), // PLY
+            new Opcode(1, AddressingMode.Implied, 0x7B, "TDC"), // TDC
+            new Opcode(3, AddressingMode.AbsoluteIndexedIndirect, 0x7C, "JMP"), // JMP ($xxxx,x)
+            new Opcode(3, AddressingMode.AbsoluteIndexedX, 0x7D, "ADC"), // ADC
+            new Opcode(3, AddressingMode.AbsoluteIndexedX, 0x7E, "ROR"), // ROR $xxxx,x
+            new Opcode(4, AddressingMode.AbsoluteIndexedLong, 0x7F, "ADC"), // ADC $xxxxxx,x
+            new Opcode(2, AddressingMode.Relative, 0x80, "BRA"), // BRA $xx
+            new Opcode(2, AddressingMode.DirectIndexedIndirect, 0x81, "STA"), // STA ($xx,x)
+            new Opcode(3, AddressingMode.RelativeLong, 0x82, "BRL"), // BRL $xxxx
+            new Opcode(2, AddressingMode.StackRelative, 0x83, "STA"), // STA $xx,s
+            new Opcode(2, AddressingMode.Direct, 0x84, "STY"), // STY $xx
+            new Opcode(2, AddressingMode.Direct, 0x85, "STA"), // STA $xx
+            new Opcode(2, AddressingMode.Direct, 0x86, "STX"), // STX $xx
+            new Opcode(2, AddressingMode.DirectIndirectLong, 0x87, "STA"), // STA [$xx]
+            new Opcode(1, AddressingMode.Implied, 0x88, "DEY"), // DEY
+            new Opcode(3, AddressingMode.Immediate, 0x89, "BIT"), // BIT #$xxxx | BIT #$xx
+            new Opcode(1, AddressingMode.Implied, 0x8A, "TXA"), // TXA
+            new Opcode(1, AddressingMode.Implied, 0x8B, "PHB"), // PHB
+            new Opcode(3, AddressingMode.Absolute, 0x8C, "STY"), // STY $xxxx
+            new Opcode(3, AddressingMode.Absolute, 0x8D, "STA"), // STA $xxxx   
+            new Opcode(3, AddressingMode.Absolute, 0x8E, "STX"), // STX $xxxx
+            new Opcode(3, AddressingMode.AbsoluteLong, 0x8F, "STA" ), // STA $xxxxxx
+            new Opcode(2, AddressingMode.Relative, 0x90, "BCC"),
+            new Opcode(2, AddressingMode.DirectIndirectIndexed, 0x91, "STA"),
+            new Opcode(2, AddressingMode.DirectIndirect, 0x92, "STA"),
+            new Opcode(2, AddressingMode.StackRelativeIndirectIndexed, 0x93, "STA"),
+            new Opcode(2, AddressingMode.DirectIndexedX, 0x94, "STY"),
+            new Opcode(2, AddressingMode.DirectIndexedX, 0x95, "STA"),
+            new Opcode(2, AddressingMode.DirectIndexedY, 0x96, "STX"),
+            new Opcode(2, AddressingMode.DirectIndirectIndexedLong, 0x97, "STA"),
+            new Opcode(1, AddressingMode.Implied, 0x98, "TYA"),
+            new Opcode(3, AddressingMode.AbsoluteIndexedY, 0x99, "STA"),
+            new Opcode(1, AddressingMode.Implied, 0x9A, "TXS"),
+            new Opcode(1, AddressingMode.Implied, 0x9B, "TXY"),
+            new Opcode(3, AddressingMode.Absolute, 0x9C, "STZ"),
+            new Opcode(3, AddressingMode.AbsoluteIndexedX, 0x9D, "STA"),
+            new Opcode(3, AddressingMode.AbsoluteIndexedX, 0x9E, "STZ"),
+            new Opcode(4, AddressingMode.AbsoluteIndexedLong, 0x9F, "STA"),
+            new Opcode(3, AddressingMode.Immediate, 0xA0, "LDY"),
+            new Opcode(2, AddressingMode.DirectIndexedIndirect, 0xA1, "LDA"),
+            new Opcode(3, AddressingMode.Immediate, 0xA2, "LDX"),
+            new Opcode(2, AddressingMode.StackRelative, 0xA3, "LDA"),
+            new Opcode(2, AddressingMode.Direct, 0xA4, "LDY"),
+            new Opcode(2, AddressingMode.Direct, 0xA5, "LDA"),
+            new Opcode(2, AddressingMode.Direct, 0xA6, "LDX"),
+            new Opcode(2, AddressingMode.DirectIndirectLong, 0xA7, "LDA"),
+            new Opcode(1, AddressingMode.Implied, 0xA8, "TAY"),
+            new Opcode(3, AddressingMode.Immediate, 0xA9, "LDA"),
+            new Opcode(1, AddressingMode.Implied, 0xAA, "TAX"),
+            new Opcode(1, AddressingMode.Implied, 0xAB, "PLB"),
+            new Opcode(3, AddressingMode.Absolute, 0xAC, "LDY"),
+            new Opcode(3, AddressingMode.Absolute, 0xAD, "LDA"),
+            new Opcode(3, AddressingMode.Absolute, 0xAE, "LDX"),
+            new Opcode(4, AddressingMode.AbsoluteLong, 0xAF, "LDA"),
+            new Opcode(2, AddressingMode.Relative, 0xB0, "BCS"),
+            new Opcode(2, AddressingMode.DirectIndirectIndexed, 0xB1, "LDA"),
+            new Opcode(2, AddressingMode.DirectIndirect, 0xB2, "LDA"),
+            new Opcode(2, AddressingMode.StackRelativeIndirectIndexed, 0xB3, "LDA"),
+            new Opcode(2, AddressingMode.DirectIndexedX, 0xB4, "LDY"),
+            new Opcode(2, AddressingMode.DirectIndexedX, 0xB5, "LDA"),
+            new Opcode(2, AddressingMode.DirectIndexedY, 0xB6, "LDX"),
+            new Opcode(2, AddressingMode.DirectIndirectIndexedLong, 0xB7, "LDA"),
+            new Opcode(1, AddressingMode.Implied, 0xB8, "CLV"),
+            new Opcode(3, AddressingMode.AbsoluteIndexedY, 0xB9, "LDA"),
+            new Opcode(1, AddressingMode.Implied, 0xBA, "TSX"),
+            new Opcode(1, AddressingMode.Implied, 0xBB, "TYX"),
+            new Opcode(3, AddressingMode.AbsoluteIndexedX, 0xBC, "LDY"),
+            new Opcode(3, AddressingMode.AbsoluteIndexedX, 0xBD, "LDA"),
+            new Opcode(3, AddressingMode.AbsoluteIndexedY, 0xBE, "LDX"),
+            new Opcode(4, AddressingMode.AbsoluteIndexedLong, 0xBF, "LDA"),
+            new Opcode(3, AddressingMode.Immediate, 0xC0, "CPY"),
+            new Opcode(2, AddressingMode.DirectIndexedIndirect, 0xC1, "CMP"),
+            new Opcode(2, AddressingMode.Immediate, 0xC2, "REP"),
+            new Opcode(2, AddressingMode.StackRelative, 0xC3, "CMP"),
+            new Opcode(2, AddressingMode.Direct, 0xC4, "CPY"),
+            new Opcode(2, AddressingMode.Direct, 0xC5, "CMP"),
+            new Opcode(2, AddressingMode.Direct, 0xC6, "DEC"),
+            new Opcode(2, AddressingMode.DirectIndirectLong, 0xC7, "CMP"),
+            new Opcode(1, AddressingMode.Implied, 0xC8, "INY"),
+            new Opcode(3, AddressingMode.Immediate, 0xC9, "CMP"),
+            new Opcode(1, AddressingMode.Implied, 0xCA, "DEX"),
+            new Opcode(1, AddressingMode.Implied, 0xCB, "WAI"),
+            new Opcode(3, AddressingMode.Absolute, 0xCC, "CPY"),
+            new Opcode(3, AddressingMode.Absolute, 0xCD, "CMP"),
+            new Opcode(3, AddressingMode.Absolute, 0xCE, "DEC"),
+            new Opcode(4, AddressingMode.AbsoluteLong, 0xCF, "CMP"),
+            new Opcode(2, AddressingMode.Relative, 0xD0, "BNE"),
+            new Opcode(2, AddressingMode.DirectIndirectIndexed, 0xD1, "CMP"),
+            new Opcode(2, AddressingMode.DirectIndirect, 0xD2, "CMP"),
+            new Opcode(2, AddressingMode.StackRelativeIndirectIndexed, 0xD3, "CMP"),
+            new Opcode(2, AddressingMode.DirectIndirect, 0xD4, "PEI"),
+            new Opcode(2, AddressingMode.DirectIndexedX, 0xD5, "CMP"),
+            new Opcode(2, AddressingMode.DirectIndexedX, 0xD6, "DEC"),
+            new Opcode(2, AddressingMode.DirectIndirectIndexedLong, 0xD7, "CMP"),
+            new Opcode(1, AddressingMode.Implied, 0xD8, "CLD"),
+            new Opcode(3, AddressingMode.AbsoluteIndexedY, 0xD9, "CMP"),
+            new Opcode(1, AddressingMode.Implied, 0xDA, "PHX"),
+            new Opcode(1, AddressingMode.Implied, 0xDB, "STP"),
+            new Opcode(3, AddressingMode.AbsoluteIndirectLong, 0xDC, "JML"),
+            new Opcode(3, AddressingMode.AbsoluteIndexedX, 0xDD, "CMP"),
+            new Opcode(3, AddressingMode.AbsoluteIndexedX, 0xDE, "DEC"),
+            new Opcode(4, AddressingMode.AbsoluteIndexedLong, 0xDF, "CMP"),
+            new Opcode(3, AddressingMode.Immediate, 0xE0, "CPX"),
+            new Opcode(2, AddressingMode.DirectIndexedIndirect, 0xE1, "SBC"),
+            new Opcode(2, AddressingMode.Immediate, 0xE2, "SEP"),
+            new Opcode(2, AddressingMode.StackRelative, 0xE3, "SBC"),
+            new Opcode(2, AddressingMode.Direct, 0xE4, "CPX"),
+            new Opcode(2, AddressingMode.Direct, 0xE5, "SBC"),
+            new Opcode(2, AddressingMode.Direct, 0xE6, "INC"),
+            new Opcode(2, AddressingMode.DirectIndirectLong, 0xE7, "SBC"),
+            new Opcode(1, AddressingMode.Implied, 0xE8, "INX"),
+            new Opcode(3, AddressingMode.Immediate, 0xE9, "SBC"),
+            new Opcode(1, AddressingMode.Implied, 0xEA, "NOP"),
+            new Opcode(1, AddressingMode.Implied, 0xEB, "XBA"),
+            new Opcode(3, AddressingMode.Absolute, 0xEC, "CPX"),
+            new Opcode(3, AddressingMode.Absolute, 0xED, "SBC"),
+            new Opcode(3, AddressingMode.Absolute, 0xEE, "INC"),
+            new Opcode(4, AddressingMode.AbsoluteLong, 0xEF, "SBC"),
+            new Opcode(2, AddressingMode.Relative, 0xF0, "BEQ"),
+            new Opcode(2, AddressingMode.DirectIndirectIndexed, 0xF1, "SBC"),
+            new Opcode(2, AddressingMode.DirectIndirect, 0xF2, "SBC"),
+            new Opcode(2, AddressingMode.StackRelativeIndirectIndexed, 0xF3, "SBC"),
+            new Opcode(3, AddressingMode.Absolute, 0xF4, "PEA"),
+            new Opcode(2, AddressingMode.DirectIndexedX, 0xF5, "SBC"),
+            new Opcode(2, AddressingMode.DirectIndexedX, 0xF6, "INC"),
+            new Opcode(2, AddressingMode.DirectIndirectIndexedLong, 0xF7, "SBC"),
+            new Opcode(1, AddressingMode.Implied, 0xF8, "SED"),
+            new Opcode(3, AddressingMode.AbsoluteIndexedY, 0xF9, "SBC"),
+            new Opcode(1, AddressingMode.Implied, 0xFA, "PLX"),
+            new Opcode(1, AddressingMode.Implied, 0xFB, "XCE"),
+            new Opcode(3, AddressingMode.AbsoluteIndexedIndirect, 0xFC, "JSR"),
+            new Opcode(3, AddressingMode.AbsoluteIndexedX, 0xFD, "SBC"),
+            new Opcode(3, AddressingMode.AbsoluteIndexedX, 0xFE, "INC"),
+            new Opcode(4, AddressingMode.AbsoluteIndexedLong, 0xFF, "SBC") // SBC $xxxxxx,x
         };
         Rom Rom { get; set; }
-        int Pc { get; set; }
+        int Pc { get => _pc; set => _pc = value; }
         Stack<byte> RomStack { get; set; } = new Stack<byte>();
         Stack<int> PcStack { get; set; } = new Stack<int>();
+        List<Routine> Routines { get; } = new List<Routine>();
         bool Invalid { get; set; }
+        bool EmulationMode { get; set; }
 
         // processor flags
-        ProcessorFlags Flags { get; set; } = 0;
-        bool A16Bit { get => Flags.IsFlagSet(ProcessorFlags.M); set => Flags = Flags.SetFlag(ProcessorFlags.M); }
-        bool A8Bit { get => !Flags.IsFlagSet(ProcessorFlags.M); set => Flags = Flags.UnSetFlag(ProcessorFlags.M); }
-        bool XY16Bit { get => Flags.IsFlagSet(ProcessorFlags.X); set => Flags = Flags.SetFlag(ProcessorFlags.X); }
-        bool XY8Bit { get => !Flags.IsFlagSet(ProcessorFlags.X); set => Flags = Flags.UnSetFlag(ProcessorFlags.X); }
+        public ProcessorFlags Flags { get => _flags; set => _flags = value; }
+        bool A16Bit { get => !Flags.IsFlagSet(ProcessorFlags.M); set => Flags.UnSetFlag(ProcessorFlags.M); }
+        bool A8Bit { get => Flags.IsFlagSet(ProcessorFlags.M); set => Flags.SetFlag(ProcessorFlags.M); }
+        bool XY16Bit { get => !Flags.IsFlagSet(ProcessorFlags.X); set => Flags.UnSetFlag(ProcessorFlags.X); }
+        bool XY8Bit { get => Flags.IsFlagSet(ProcessorFlags.X); set => Flags.SetFlag(ProcessorFlags.X); }
+
+        Dictionary<RegisterType, Register> Registers = new Dictionary<RegisterType, Register>();
 
         public Parser(string filename, int entrypoint) {
             Rom = new Rom(filename);
             Pc = Rom.SnesToPc(entrypoint);
+            foreach (var type in (RegisterType[])Enum.GetValues(typeof(RegisterType))) {
+                Registers.Add(type, new Register(type));
+            }
         }
 
         // TODO: implement explore function
-        public void Explore() {
-            throw new NotImplementedException();
+        public void Explore(TextWriter output) {
+            while (!Invalid) {
+                byte curbyte = Rom.GetByte(Pc);
+                Opcode op = Opcodes[curbyte];
+                if (op.Mode == AddressingMode.Immediate && op.Size - 1 == 2) {
+                    if (A16Bit)
+                        op.SetOperand(Rom.GetWord(Pc + 1));
+                    else
+                        op.SetOperand(Rom.GetByte(Pc + 1));
+                    op.Size = A16Bit ? 3 : 2;
+                } else {
+                    switch (op.Size - 1) {
+                        case 0:
+                            break;
+                        case 1:
+                            op.SetOperand(Rom.GetByte(Pc + 1));
+                            break;
+                        case 2:
+                            op.SetOperand(Rom.GetWord(Pc + 1));
+                            break;
+                        case 3:
+                            op.SetOperand((int)Rom.GetLong(Pc + 1));
+                            break;
+                        default:
+                            throw new InvalidOperationException();
+                    }
+                }
+                output.WriteLine($"{op,-20};${Rom.PcToSnes(Pc):X06}{"",-20}{Flags.FlagsToString()}");
+                if (op.Code == 0x00)
+                    Invalid = true;
+                if (op.IsReturnable()) {
+                    var returnable = op.GetReturnableFromOp(Pc);
+                    returnable.PushReturn(RomStack);
+                    returnable.UpdateDestination(Rom, ref _pc);
+                    Explore(output);
+                } else if (op.IsJumpable()) {
+                    op.GetJumpableFromOp().UpdateDestination(Rom, ref _pc);
+                } else if (op.IsReturning()) {
+                    op.GetReturningFromOp(RomStack).Return(ref _pc);
+                    return;
+                } else {
+                    if (op.CanModifyMode()) {
+                        op.GetModifierFromOp().UpdateProcessorFlags(ref _flags, RomStack);
+                    }
+                    Pc += op.Size;
+                }
+            }
         }
     }
 }

@@ -14,7 +14,7 @@ namespace SprDisassembler {
         public Rom(string filename) {
             if (!File.Exists(filename)) {
                 Console.WriteLine("The specified rom file couldn't be found");
-                return;
+                throw new FileNotFoundException();
             }
             Data = File.ReadAllBytes(filename);
             HeaderSize = Data.Length & 0x7FFF;
@@ -48,7 +48,7 @@ namespace SprDisassembler {
  
         public byte[] GetBuffer(int addr, int size) {
             if (addr + size > Data.Length)
-                return new byte[0];
+                return Array.Empty<byte>();
             byte[] buf = new byte[size];
             Array.Copy(Data, addr, buf, 0, size);
             return buf;
@@ -56,7 +56,7 @@ namespace SprDisassembler {
 
         public ReadOnlySpan<byte> GetReadOnlyBuffer(int addr, int size) {
             if (addr + size > Data.Length)
-                return new byte[0];
+                return Array.Empty<byte>();
             return Data.AsSpan(addr, size);
         }
 
