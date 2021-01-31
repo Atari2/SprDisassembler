@@ -67,7 +67,7 @@ namespace SprDisassembler {
         }
         public void UpdateDestination(Rom rom, ref int curpc) {
             if (_mnemonic == _jumpables[^1]) {
-                curpc += (sbyte)_destination;
+                curpc += ((sbyte)_destination + 2);
             } else {
                 curpc = rom.SnesToPc(Destination);
             }
@@ -218,15 +218,23 @@ namespace SprDisassembler {
                 AddressingMode.AbsoluteLong => codeStr,
                 AddressingMode.AbsoluteIndexedLong => codeStr + ",x",
                 AddressingMode.StackRelative => codeStr + ",s",
-                AddressingMode.StackRelativeIndirectIndexed => codeStr + ",s),y",
-                AddressingMode.AbsoluteIndirect => codeStr + ")",
-                AddressingMode.AbsoluteIndirectLong => codeStr + "]",
-                AddressingMode.AbsoluteIndexedIndirect => codeStr + ",x)",
+                AddressingMode.StackRelativeIndirectIndexed => "(" + codeStr + ",s),y",
+                AddressingMode.AbsoluteIndirect => "(" + codeStr + ")",
+                AddressingMode.AbsoluteIndirectLong => "[" + codeStr + "]",
+                AddressingMode.AbsoluteIndexedIndirect => "(" +codeStr + ",x)",
                 AddressingMode.ImpliedAccumulator => "",
                 AddressingMode.BlockMove => codeStr,
                 _ => throw new NotImplementedException()
             }) ;
             return builder.ToString();
+        }
+
+        public string ToStringWithSize(int size) {
+            int oldsize = Size;
+            Size = size;
+            string ret = ToString();
+            Size = oldsize;
+            return ret;
         }
 
         public bool IsJumpable() {

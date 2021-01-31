@@ -118,7 +118,9 @@ namespace SprDisassembler {
 
     }
     class Parser {
+        // TODO: Add labels -> parse stack -> make sure jumps go where they're supposed to go (aka, ignore conditional and indirect jumps)
         private int _pc;
+        private ulong _loop = 0;
         private ProcessorFlags _flags = ProcessorFlags.M | ProcessorFlags.X;
         public static List<Opcode> Opcodes = new List<Opcode>() {
             new Opcode(2, AddressingMode.Immediate, 0x00, "BRK"), // BRK #$xx
@@ -264,7 +266,7 @@ namespace SprDisassembler {
             new Opcode(3, AddressingMode.Absolute, 0x8C, "STY"), // STY $xxxx
             new Opcode(3, AddressingMode.Absolute, 0x8D, "STA"), // STA $xxxx   
             new Opcode(3, AddressingMode.Absolute, 0x8E, "STX"), // STX $xxxx
-            new Opcode(3, AddressingMode.AbsoluteLong, 0x8F, "STA" ), // STA $xxxxxx
+            new Opcode(4, AddressingMode.AbsoluteLong, 0x8F, "STA" ), // STA $xxxxxx
             new Opcode(2, AddressingMode.Relative, 0x90, "BCC"),
             new Opcode(2, AddressingMode.DirectIndirectIndexed, 0x91, "STA"),
             new Opcode(2, AddressingMode.DirectIndirect, 0x92, "STA"),
@@ -403,19 +405,30 @@ namespace SprDisassembler {
             }
         }
 
-        // TODO: implement explore function
+        // TODO: implement explore function correctly
         public void Explore(TextWriter output) {
+            if (_loop >= 0x100) {
+                throw new InvalidOperationException();
+            }
+            _loop++;
             while (!Invalid) {
                 byte curbyte = Rom.GetByte(Pc);
                 Opcode op = Opcodes[curbyte];
-                if (op.Mode == AddressingMode.Immediate && op.Size - 1 == 2) {
+                int size = op.Size;
+                if (op.Mode == AddressingMode.Immediate && size - 1 == 2) {
                     if (A16Bit)
                         op.SetOperand(Rom.GetWord(Pc + 1));
                     else
                         op.SetOperand(Rom.GetByte(Pc + 1));
-                    op.Size = A16Bit ? 3 : 2;
+
+                    size = op.Mnemonic[^1] switch {
+                        'A' => A16Bit ? 3 : 2,
+                        'X' => XY16Bit ? 3 : 2,
+                        'Y' => XY16Bit ? 3 : 2,
+                        _ => A16Bit ? 3 : 2
+                    };
                 } else {
-                    switch (op.Size - 1) {
+                    switch (size - 1) {
                         case 0:
                             break;
                         case 1:
@@ -431,7 +444,7 @@ namespace SprDisassembler {
                             throw new InvalidOperationException();
                     }
                 }
-                output.WriteLine($"{op,-20};${Rom.PcToSnes(Pc):X06}{"",-20}{Flags.FlagsToString()}");
+                output.WriteLine($"{op.ToStringWithSize(size),-20};${Rom.PcToSnes(Pc):X06}{"",-20}{Flags.FlagsToString()}");
                 if (op.Code == 0x00)
                     Invalid = true;
                 if (op.IsReturnable()) {
@@ -448,7 +461,7 @@ namespace SprDisassembler {
                     if (op.CanModifyMode()) {
                         op.GetModifierFromOp().UpdateProcessorFlags(ref _flags, RomStack);
                     }
-                    Pc += op.Size;
+                    Pc += size;
                 }
             }
         }

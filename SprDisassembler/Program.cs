@@ -12,7 +12,11 @@ namespace SprDisassembler {
             if (args.Length > 2) {
                 output = File.CreateText(args[^1]);
             }
-            parser.Explore(output);
+            try {
+                parser.Explore(output);
+            } catch (InvalidOperationException) {
+                Console.WriteLine("Recursion limit reached");
+            }
             output.Close();
         }
     }
