@@ -126,7 +126,7 @@ namespace SprDisassembler {
 
         public void UpdateProcessorFlags(ref ProcessorFlags flags, Stack<byte> romStack) {
             if (_mnemonic == _modifiers[^1]) {
-                flags = ProcessorFlags.M | ProcessorFlags.X;//(ProcessorFlags)romStack.Pop();
+                flags = ProcessorFlags.M | ProcessorFlags.X;        //(ProcessorFlags)romStack.Pop();, this just resets both A and X/Y to 8 bit, for no real reason
             } else {
                 for (int i = 0; i < 8; i++) {
                     byte val = (byte)((op.Operand & 0xFF) & (1 << i));

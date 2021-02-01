@@ -32,6 +32,10 @@ namespace SprDisassembler {
         PC
     }
 
+    public class LoopEncounteredException : Exception {
+        
+    }
+
     public class Register {
         string Name { get => RegType.ToString(); }
         RegisterType RegType { get; set; }
@@ -56,6 +60,12 @@ namespace SprDisassembler {
             else
                 return (ushort)(Value & 0xFF);
         }
+    }
+
+    public enum LabelType {
+        Jumpable,
+        Branchable,
+        Returnable
     }
 
     /// <summary>
@@ -389,7 +399,7 @@ namespace SprDisassembler {
         Stack<byte> RomStack { get; set; } = new Stack<byte>();
         Stack<int> PcStack { get; set; } = new Stack<int>();
         Dictionary<int, string> Routines { get; } = new Dictionary<int, string>();
-        List<Label> Labels { get; } = new List<Label>();
+        Dictionary<Label, LabelType> Labels { get; } = new Dictionary<Label, LabelType>();
         bool Invalid { get; set; }
         bool EmulationMode { get; set; }
 
@@ -400,6 +410,7 @@ namespace SprDisassembler {
         bool XY16Bit { get => !Flags.IsFlagSet(ProcessorFlags.X); set => Flags.UnSetFlag(ProcessorFlags.X); }
         bool XY8Bit { get => Flags.IsFlagSet(ProcessorFlags.X); set => Flags.SetFlag(ProcessorFlags.X); }
 
+        // unused for now
         Dictionary<RegisterType, Register> Registers = new Dictionary<RegisterType, Register>() {
             { RegisterType.A,  new Register(RegisterType.A) },
             { RegisterType.X,  new Register(RegisterType.X) },
@@ -417,10 +428,10 @@ namespace SprDisassembler {
             Pc = Rom.SnesToPc(entrypoint);
         }
 
-        // TODO: implement explore function properly
+        // TODO: refactor to take account of conditional branches
         public void Explore(OutputData output) {
-            if (_loop >= 0x100) {       // based infinite loop detection
-                throw new InvalidOperationException();
+            if (_loop >= 0x100) {       // extremely (to say the least) infinite loop detection
+                throw new LoopEncounteredException();
             }
             _loop++;
             bool IsReturned = false;
@@ -458,7 +469,7 @@ namespace SprDisassembler {
                             throw new InvalidOperationException();
                     }
                 }
-                if (op.Code == 0x00 || op.Code == 0x02)
+                if (op.Code == 0x00 || op.Code == 0x02 || op.Code == 0xDB)      // brk, cop, stp
                     Invalid = true;
                 if (op.IsReturnable()) {
                     var returnable = op.GetReturnableFromOp(Pc);
@@ -482,7 +493,6 @@ namespace SprDisassembler {
                     op.GetJumpableFromOp().UpdateDestination(Rom, ref _pc);
                     PrintLine(output, op, currPc, size);
                     alreadyPrinted = true;
-                    PrintLine(output, $"\n;;\n;; Jumping to ${Rom.PcToSnes(Pc):X06}\n;;", Pc);
                 } else if (op.IsIndirectJumpable()) {
                     Pc += size;
                     IsReturned = true;
@@ -501,33 +511,31 @@ namespace SprDisassembler {
                     PrintLine(output, op, currPc, size);
             }
         }
+        // the printing functions are both bad and the logic in the whole thing is a bit fucked
         private void PrintLine(OutputData output, string text, int currpc) {
             output.WriteLine(text, currpc);
         }
         private void PrintLine(OutputData output, Opcode op, int currPc, int size) {
-            if (Labels.Exists(x => x.Pc == Rom.PcToSnes(currPc)))
-                output.WriteLine($"{Labels.Find(x => x.Pc == Rom.PcToSnes(currPc))}:", currPc);
+            Label poss = new Label(currPc, Rom);
+            if (Labels.ContainsKey(poss))
+                output.WriteLine($"{poss}:", currPc);
             if (op.IsBranchable()) {
-                int branchPc = op.IsJumpable() ? Pc : Pc + (sbyte)op.Operand;
+                int branchPc = op.IsJumpable() ? Pc : Pc + (sbyte)op.Operand;       // this is bad
                 Label label = new Label(branchPc, Rom);
-                var existingLabel = Labels.Find(x => x.Pc == branchPc);
-                if (existingLabel == default) {     // if not found, use the new one
-                    Labels.Add(label);
+                if (!Labels.ContainsKey(label)) {     // if not found, use the new one
+                    Labels.Add(label, LabelType.Branchable);
                     output.WriteLine($"\t{op.ToStringWithLabel(label),-20};${Rom.PcToSnes(currPc):X06}{"",-10}{Flags.FlagsToString()}", currPc);    // branch doesn't exist and points to a previous pc address, let's see if we can add it
                     if (branchPc < currPc)
                         output.WriteLineAtPc($"{label}:", branchPc);
                 } else {
-                    output.WriteLine($"\t{op.ToStringWithLabel(existingLabel),-20};${Rom.PcToSnes(currPc):X06}{"",-10}{Flags.FlagsToString()}", currPc);
+                    output.WriteLine($"\t{op.ToStringWithLabel(label),-20};${Rom.PcToSnes(currPc):X06}{"",-10}{Flags.FlagsToString()}", currPc);
                 }
             } else if (op.IsJumpable() || op.IsReturnable()) {
                 Label label = new Label(Pc, Rom);
-                var existingLabel = Labels.Find(x => label == x);
-                if (existingLabel == default) {     // if not found, use the new one
-                    Labels.Add(label);
-                    output.WriteLine($"\t{op.ToStringWithLabel(label),-20};${Rom.PcToSnes(currPc):X06}{"",-10}{Flags.FlagsToString()}", currPc);
-                } else {
-                    output.WriteLine($"\t{op.ToStringWithLabel(existingLabel),-20};${Rom.PcToSnes(currPc):X06}{"",-10}{Flags.FlagsToString()}", currPc);
+                if (!Labels.ContainsKey(label)) {     // if not found, add the new one and use it
+                    Labels.Add(label, op.IsReturnable() ? LabelType.Returnable : LabelType.Jumpable);
                 }
+                output.WriteLine($"\t{op.ToStringWithLabel(label),-20};${Rom.PcToSnes(currPc):X06}{"",-10}{Flags.FlagsToString()}", currPc);
             } else {
                 output.WriteLine($"\t{op.ToStringWithSize(size),-20};${Rom.PcToSnes(currPc):X06}{"",-10}{Flags.FlagsToString()}", currPc);
             }

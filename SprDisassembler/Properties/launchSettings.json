@@ -2,7 +2,7 @@
   "profiles": {
     "SprDisassembler": {
       "commandName": "Project",
-      "commandLineArgs": "test.smc 0x008000 output.asm"
+      "commandLineArgs": "test.smc 0x00F629 output.asm"
     }
   }
 }
