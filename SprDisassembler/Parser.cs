@@ -103,8 +103,12 @@ namespace SprDisassembler {
             return flags;
         }
 
-        public static string FlagsToString(this ProcessorFlags flags, bool prependName = true) {
-            string repr = prependName ? "Processor flags: " : "";
+        /// <summary>
+        /// Converts flags to a string like "nvmxdizc", where uppercase means that a flag is active and lowercase means not active.
+        /// </summary>
+        /// <param name="flags">Flags to evaluate</param>
+        /// <returns></returns>
+        public static string FlagsToString(this ProcessorFlags flags) {
             char[] arr = new char[8];
             int i = 0;
             foreach (var type in (ProcessorFlags[])Enum.GetValues(typeof(ProcessorFlags))) {
@@ -112,7 +116,7 @@ namespace SprDisassembler {
                 i++;
             }
             Array.Reverse(arr);
-            return repr + new string(arr);
+            return new string(arr);
         }
 
 
@@ -163,7 +167,7 @@ namespace SprDisassembler {
             new Opcode(2, AddressingMode.Direct, 0x25, "AND"), // AND $xx
             new Opcode(2, AddressingMode.Direct, 0x26, "ROL"), // ROL $xx
             new Opcode(2, AddressingMode.DirectIndirectLong, 0x27, "AND"), // AND [$xx]
-            new Opcode(2, AddressingMode.Implied, 0x28, "PLP"), // PLP
+            new Opcode(1, AddressingMode.Implied, 0x28, "PLP"), // PLP
             new Opcode(3, AddressingMode.Immediate, 0x29, "AND"), // AND #$xxxx | AND #$xx
             new Opcode(1, AddressingMode.ImpliedAccumulator, 0x2A, "ROL"), // ROL A
             new Opcode(1, AddressingMode.Implied, 0x2B, "PLD"), // PLD
@@ -380,11 +384,12 @@ namespace SprDisassembler {
             new Opcode(3, AddressingMode.AbsoluteIndexedX, 0xFE, "INC"),
             new Opcode(4, AddressingMode.AbsoluteIndexedLong, 0xFF, "SBC") // SBC $xxxxxx,x
         };
-        Rom Rom { get; set; }
-        int Pc { get => _pc; set => _pc = value; }
+        public Rom Rom { get; set; }
+        public int Pc { get => _pc; set => _pc = value; }
         Stack<byte> RomStack { get; set; } = new Stack<byte>();
         Stack<int> PcStack { get; set; } = new Stack<int>();
-        List<Routine> Routines { get; } = new List<Routine>();
+        Dictionary<int, string> Routines { get; } = new Dictionary<int, string>();
+        List<Label> Labels { get; } = new List<Label>();
         bool Invalid { get; set; }
         bool EmulationMode { get; set; }
 
@@ -395,38 +400,47 @@ namespace SprDisassembler {
         bool XY16Bit { get => !Flags.IsFlagSet(ProcessorFlags.X); set => Flags.UnSetFlag(ProcessorFlags.X); }
         bool XY8Bit { get => Flags.IsFlagSet(ProcessorFlags.X); set => Flags.SetFlag(ProcessorFlags.X); }
 
-        Dictionary<RegisterType, Register> Registers = new Dictionary<RegisterType, Register>();
+        Dictionary<RegisterType, Register> Registers = new Dictionary<RegisterType, Register>() {
+            { RegisterType.A,  new Register(RegisterType.A) },
+            { RegisterType.X,  new Register(RegisterType.X) },
+            { RegisterType.Y,  new Register(RegisterType.Y) },
+            { RegisterType.S,  new Register(RegisterType.S) },
+            { RegisterType.DB, new Register(RegisterType.DB) },
+            { RegisterType.DP, new Register(RegisterType.DP) },
+            { RegisterType.PB, new Register(RegisterType.PB) },
+            { RegisterType.P,  new Register(RegisterType.P) },
+            { RegisterType.PC, new Register(RegisterType.PC) }
+        };
 
         public Parser(string filename, int entrypoint) {
             Rom = new Rom(filename);
             Pc = Rom.SnesToPc(entrypoint);
-            foreach (var type in (RegisterType[])Enum.GetValues(typeof(RegisterType))) {
-                Registers.Add(type, new Register(type));
-            }
         }
 
-        // TODO: implement explore function correctly
-        public void Explore(TextWriter output) {
-            if (_loop >= 0x100) {
+        // TODO: implement explore function properly
+        public void Explore(OutputData output) {
+            if (_loop >= 0x100) {       // based infinite loop detection
                 throw new InvalidOperationException();
             }
             _loop++;
-            while (!Invalid) {
+            bool IsReturned = false;
+            while (!Invalid && !IsReturned) {
+                int currPc = _pc;
+                bool alreadyPrinted = false;
                 byte curbyte = Rom.GetByte(Pc);
                 Opcode op = Opcodes[curbyte];
                 int size = op.Size;
                 if (op.Mode == AddressingMode.Immediate && size - 1 == 2) {
-                    if (A16Bit)
-                        op.SetOperand(Rom.GetWord(Pc + 1));
-                    else
-                        op.SetOperand(Rom.GetByte(Pc + 1));
-
                     size = op.Mnemonic[^1] switch {
                         'A' => A16Bit ? 3 : 2,
                         'X' => XY16Bit ? 3 : 2,
                         'Y' => XY16Bit ? 3 : 2,
                         _ => A16Bit ? 3 : 2
                     };
+                    if (size == 3)
+                        op.SetOperand(Rom.GetWord(Pc + 1));
+                    else
+                        op.SetOperand(Rom.GetByte(Pc + 1));
                 } else {
                     switch (size - 1) {
                         case 0:
@@ -444,25 +458,78 @@ namespace SprDisassembler {
                             throw new InvalidOperationException();
                     }
                 }
-                output.WriteLine($"{op.ToStringWithSize(size),-20};${Rom.PcToSnes(Pc):X06}{"",-20}{Flags.FlagsToString()}");
-                if (op.Code == 0x00)
+                if (op.Code == 0x00 || op.Code == 0x02)
                     Invalid = true;
                 if (op.IsReturnable()) {
                     var returnable = op.GetReturnableFromOp(Pc);
-                    returnable.PushReturn(RomStack);
-                    returnable.UpdateDestination(Rom, ref _pc);
-                    Explore(output);
+                    alreadyPrinted = true;
+                    if (!Routines.ContainsKey(returnable.GetDestination())) {
+                        returnable.PushReturn(RomStack);
+                        returnable.UpdateDestination(Rom, ref _pc);
+                        string routineIntro = $"\n;;\n;; Subroutine at ${Rom.PcToSnes(Pc):X06}\n;;";
+                        Routines.Add(returnable.GetDestination(), routineIntro);
+                        PrintLine(output, op, currPc, size);
+                        PrintLine(output, routineIntro, Pc);
+                        Explore(output);
+                    } else {
+                        int oldPc = Pc;
+                        returnable.UpdateDestination(Rom, ref _pc);
+                        PrintLine(output, op, currPc, size);
+                        Pc = oldPc;
+                        Pc += size;
+                    }
                 } else if (op.IsJumpable()) {
                     op.GetJumpableFromOp().UpdateDestination(Rom, ref _pc);
+                    PrintLine(output, op, currPc, size);
+                    alreadyPrinted = true;
+                    PrintLine(output, $"\n;;\n;; Jumping to ${Rom.PcToSnes(Pc):X06}\n;;", Pc);
+                } else if (op.IsIndirectJumpable()) {
+                    Pc += size;
+                    IsReturned = true;
                 } else if (op.IsReturning()) {
+                    alreadyPrinted = true;
+                    PrintLine(output, op, currPc, size);
                     op.GetReturningFromOp(RomStack).Return(ref _pc);
-                    return;
+                    IsReturned = true;
                 } else {
                     if (op.CanModifyMode()) {
                         op.GetModifierFromOp().UpdateProcessorFlags(ref _flags, RomStack);
                     }
                     Pc += size;
                 }
+                if (!alreadyPrinted)
+                    PrintLine(output, op, currPc, size);
+            }
+        }
+        private void PrintLine(OutputData output, string text, int currpc) {
+            output.WriteLine(text, currpc);
+        }
+        private void PrintLine(OutputData output, Opcode op, int currPc, int size) {
+            if (Labels.Exists(x => x.Pc == Rom.PcToSnes(currPc)))
+                output.WriteLine($"{Labels.Find(x => x.Pc == Rom.PcToSnes(currPc))}:", currPc);
+            if (op.IsBranchable()) {
+                int branchPc = op.IsJumpable() ? Pc : Pc + (sbyte)op.Operand;
+                Label label = new Label(branchPc, Rom);
+                var existingLabel = Labels.Find(x => x.Pc == branchPc);
+                if (existingLabel == default) {     // if not found, use the new one
+                    Labels.Add(label);
+                    output.WriteLine($"\t{op.ToStringWithLabel(label),-20};${Rom.PcToSnes(currPc):X06}{"",-10}{Flags.FlagsToString()}", currPc);    // branch doesn't exist and points to a previous pc address, let's see if we can add it
+                    if (branchPc < currPc)
+                        output.WriteLineAtPc($"{label}:", branchPc);
+                } else {
+                    output.WriteLine($"\t{op.ToStringWithLabel(existingLabel),-20};${Rom.PcToSnes(currPc):X06}{"",-10}{Flags.FlagsToString()}", currPc);
+                }
+            } else if (op.IsJumpable() || op.IsReturnable()) {
+                Label label = new Label(Pc, Rom);
+                var existingLabel = Labels.Find(x => label == x);
+                if (existingLabel == default) {     // if not found, use the new one
+                    Labels.Add(label);
+                    output.WriteLine($"\t{op.ToStringWithLabel(label),-20};${Rom.PcToSnes(currPc):X06}{"",-10}{Flags.FlagsToString()}", currPc);
+                } else {
+                    output.WriteLine($"\t{op.ToStringWithLabel(existingLabel),-20};${Rom.PcToSnes(currPc):X06}{"",-10}{Flags.FlagsToString()}", currPc);
+                }
+            } else {
+                output.WriteLine($"\t{op.ToStringWithSize(size),-20};${Rom.PcToSnes(currPc):X06}{"",-10}{Flags.FlagsToString()}", currPc);
             }
         }
     }

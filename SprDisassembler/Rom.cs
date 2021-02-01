@@ -4,7 +4,7 @@ using System.IO;
 using System.Text;
 
 namespace SprDisassembler {
-    class Rom {
+    public class Rom {
         byte[] Data { get; set; }
         bool Header { get; set; }
 

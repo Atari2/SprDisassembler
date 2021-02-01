@@ -54,11 +54,15 @@ namespace SprDisassembler {
     class Jumpable : IJumpable {
         private int _destination;
         private string _mnemonic;
+        private Opcode op;
         private static readonly string[] _jumpables = { "JMP", "JSL", "JML", "JSR", "BRA" };
+        private static readonly AddressingMode[] _modes = { AddressingMode.Relative, AddressingMode.RelativeLong, AddressingMode.Absolute, AddressingMode.AbsoluteLong };
         public int Destination { get => _destination; set => _destination = value; }
         public static IEnumerable<string> Jumpables { get => _jumpables; }
+        public static IEnumerable<AddressingMode> Modes { get => _modes; }
 
         public Jumpable(Opcode op) {
+            this.op = op;
             _mnemonic = op.Mnemonic;
             if (Jumpables.Contains(op.Mnemonic))
                 Destination = op.Operand;
@@ -67,7 +71,9 @@ namespace SprDisassembler {
         }
         public void UpdateDestination(Rom rom, ref int curpc) {
             if (_mnemonic == _jumpables[^1]) {
-                curpc += ((sbyte)_destination + 2);
+                curpc += (sbyte)_destination + 2;
+            } else if (op.Size == 3) {
+                curpc = (curpc & 0xFF0000) | (rom.SnesToPc(Destination) & 0x00FFFF);
             } else {
                 curpc = rom.SnesToPc(Destination);
             }
@@ -120,7 +126,7 @@ namespace SprDisassembler {
 
         public void UpdateProcessorFlags(ref ProcessorFlags flags, Stack<byte> romStack) {
             if (_mnemonic == _modifiers[^1]) {
-                flags = (ProcessorFlags)romStack.Pop();
+                flags = ProcessorFlags.M | ProcessorFlags.X;//(ProcessorFlags)romStack.Pop();
             } else {
                 for (int i = 0; i < 8; i++) {
                     byte val = (byte)((op.Operand & 0xFF) & (1 << i));
@@ -185,13 +191,19 @@ namespace SprDisassembler {
 
         public override string ToString() {
             StringBuilder builder = new StringBuilder(Mnemonic.ToUpper());
-            builder.Append((Size - 1) switch {
-                0 => "",
-                1 => ".b ",
-                2 => ".w ",
-                3 => ".l ",
-                _ => throw new NotImplementedException()
-            });
+            if (Mode != AddressingMode.Immediate && Mode != AddressingMode.Relative) {
+                builder.Append((Size - 1) switch {
+                    0 => "",
+                    1 => ".b ",
+                    2 => ".w ",
+                    3 => ".l ",
+                    _ => throw new NotImplementedException()
+                });
+            } else {
+                builder.Append(' ');
+            }
+            while (builder.Length < 6)
+                builder.Append(' ');
             string codeStr;
             if (Mode != AddressingMode.BlockMove) {
                 string format = string.Format("${{0:X0{0}}}", (Size - 1) * 2);
@@ -237,8 +249,17 @@ namespace SprDisassembler {
             return ret;
         }
 
+        public bool IsBranchable() {
+            return Mode == AddressingMode.Relative || Mode == AddressingMode.RelativeLong;
+        }
+
         public bool IsJumpable() {
-            return Jumpable.Jumpables.Contains(Mnemonic);
+            return Jumpable.Jumpables.Contains(Mnemonic) && Jumpable.Modes.Contains(Mode);
+        }
+
+        public bool IsIndirectJumpable() {
+            string modeString = Mode.ToString();
+            return Jumpable.Jumpables.Contains(Mnemonic) && (modeString.Contains("Indirect") || modeString.Contains("Indexed"));
         }
 
         public bool IsReturnable() {
@@ -280,5 +301,10 @@ namespace SprDisassembler {
             else
                 throw new InvalidOperationException();
         }
+
+        public string ToStringWithLabel(Label label) {
+            return ToString().Split()[0] + $" {label}";
+        }
+
     }
 }
