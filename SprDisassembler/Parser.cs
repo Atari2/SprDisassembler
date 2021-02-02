@@ -2,137 +2,14 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using System.Linq;
 
 namespace SprDisassembler {
     /// <summary>
     /// Enum that represents the state of the processor flags during exploration of the entrypoint
     /// </summary>
-    [Flags]
-    public enum ProcessorFlags : byte {
-        // nvmxdizc
-        C = 0x01,
-        Z = 0x02,
-        I = 0x04,
-        D = 0x08,
-        X = 0x10,
-        M = 0x20,
-        V = 0x40,
-        N = 0x80
-    }
-
-    public enum RegisterType {
-        A,
-        X,
-        Y,
-        S,
-        DB,
-        DP,
-        PB,
-        P,
-        PC
-    }
-
-    public class LoopEncounteredException : Exception {
-        
-    }
-
-    public class Register {
-        string Name { get => RegType.ToString(); }
-        RegisterType RegType { get; set; }
-        ushort Value;
-        public Register(RegisterType type) {
-            RegType = type;
-            Value = 0;
-        }
-
-        public void UpdateValue(ushort newvalue, bool length) {
-            if (length)
-                Value = newvalue;
-            else {
-                Value &= 0xFF00;
-                Value |= (ushort)(newvalue & 0xFF);
-            }
-        }
-
-        public ushort GetValue(bool length) {
-            if (length)
-                return Value;
-            else
-                return (ushort)(Value & 0xFF);
-        }
-    }
-
-    public enum LabelType {
-        Jumpable,
-        Branchable,
-        Returnable
-    }
-
-    /// <summary>
-    /// Extension methods for the ProcessorFlags enum
-    /// </summary>
-    public static class FlagsExtensions {
-
-        /// <summary>
-        /// Checks if specified Flags(s) is/are set.
-        /// </summary>
-        /// <param name="flags"> Instance to check </param>
-        /// <param name="other"> Flags to check if they are set</param>
-        /// <returns>true if flag(s) is/are set, false otherwise</returns>
-        public static bool IsFlagSet(this ProcessorFlags flags, ProcessorFlags other) {
-            return (flags & other) != 0;
-        }
-        /// <summary>
-        /// Sets specified flag(s)
-        /// </summary>
-        /// <param name="flags"> Instance to set </param>
-        /// <param name="other"> Flag(s) to set </param>
-        /// <returns> new instance with specified flag set </returns>
-        public static ProcessorFlags SetFlag(this ProcessorFlags flags, ProcessorFlags other) {
-            flags |= other;
-            return flags;
-        }
-        /// <summary>
-        /// Unsets specified flag(s)
-        /// </summary>
-        /// <param name="flags"> Instance to unset </param>
-        /// <param name="other"> Flag(s) to set </param>
-        /// <returns> new instance with specified flags unset </returns>
-        public static ProcessorFlags UnSetFlag(this ProcessorFlags flags, ProcessorFlags other) {
-            flags &= ((ProcessorFlags)0xFF ^ other);
-            return flags;
-        }
-        /// <summary>
-        /// Inverts specified flag(s)
-        /// </summary>
-        /// <param name="flags"> Instance to invert </param>
-        /// <param name="other"> Flag(s) to invert </param>
-        /// <returns> new instnace with specified flags inverted </returns>
-        public static ProcessorFlags InvertFlag(this ProcessorFlags flags, ProcessorFlags other) {
-            flags ^= other;
-            return flags;
-        }
-
-        /// <summary>
-        /// Converts flags to a string like "nvmxdizc", where uppercase means that a flag is active and lowercase means not active.
-        /// </summary>
-        /// <param name="flags">Flags to evaluate</param>
-        /// <returns></returns>
-        public static string FlagsToString(this ProcessorFlags flags) {
-            char[] arr = new char[8];
-            int i = 0;
-            foreach (var type in (ProcessorFlags[])Enum.GetValues(typeof(ProcessorFlags))) {
-                arr[i] = flags.IsFlagSet(type) ? type.ToString().ToUpper()[0] : type.ToString().ToLower()[0];
-                i++;
-            }
-            Array.Reverse(arr);
-            return new string(arr);
-        }
-
-
-    }
     class Parser {
-        // TODO: Add labels -> parse stack -> make sure jumps go where they're supposed to go (aka, ignore conditional and indirect jumps)
+        // TODO: Parse stack -> make sure jumps go where they're supposed to go (aka, ignore conditional and indirect jumps)
         private int _pc;
         private ulong _loop = 0;
         private ProcessorFlags _flags = ProcessorFlags.M | ProcessorFlags.X;
@@ -395,19 +272,21 @@ namespace SprDisassembler {
             new Opcode(4, AddressingMode.AbsoluteIndexedLong, 0xFF, "SBC") // SBC $xxxxxx,x
         };
         public Rom Rom { get; set; }
+        private readonly int Origin;
         public int Pc { get => _pc; set => _pc = value; }
         Stack<byte> RomStack { get; set; } = new Stack<byte>();
         Stack<int> PcStack { get; set; } = new Stack<int>();
         Dictionary<int, string> Routines { get; } = new Dictionary<int, string>();
-        Dictionary<Label, LabelType> Labels { get; } = new Dictionary<Label, LabelType>();
+        Dictionary<int, Label> Labels { get; } = new Dictionary<int, Label>();
         bool Invalid { get; set; }
         bool EmulationMode { get; set; }
+        OutputData Output;
 
         // processor flags
         public ProcessorFlags Flags { get => _flags; set => _flags = value; }
-        bool A16Bit { get => !Flags.IsFlagSet(ProcessorFlags.M); set => Flags.UnSetFlag(ProcessorFlags.M); }
+        bool A16Bit { get => Flags.IsFlagClear(ProcessorFlags.M); set => Flags.ClearFlag(ProcessorFlags.M); }
         bool A8Bit { get => Flags.IsFlagSet(ProcessorFlags.M); set => Flags.SetFlag(ProcessorFlags.M); }
-        bool XY16Bit { get => !Flags.IsFlagSet(ProcessorFlags.X); set => Flags.UnSetFlag(ProcessorFlags.X); }
+        bool XY16Bit { get => Flags.IsFlagClear(ProcessorFlags.X); set => Flags.ClearFlag(ProcessorFlags.X); }
         bool XY8Bit { get => Flags.IsFlagSet(ProcessorFlags.X); set => Flags.SetFlag(ProcessorFlags.X); }
 
         // unused for now
@@ -423,121 +302,105 @@ namespace SprDisassembler {
             { RegisterType.PC, new Register(RegisterType.PC) }
         };
 
-        public Parser(string filename, int entrypoint) {
+        public Parser(string filename, int entrypoint, string outputName) {
             Rom = new Rom(filename);
             Pc = Rom.SnesToPc(entrypoint);
+            Origin = Pc;
+            if (outputName != null) {
+                Output = new OutputData(outputName);
+            } else {
+                Output = new OutputData();
+            }
+            string entrypointIntro = $"\n;;\n;; Entrypoint at ${Rom.PcToSnes(Pc):X06}\n;;";
+            Label entryLabel = new Label(Origin, Rom);
+            Labels.Add(Origin, entryLabel);
+            Routines.Add(Pc, entrypointIntro);
+            PrintLine(entrypointIntro);
+            PrintLine($"{entryLabel}:");
         }
 
-        // TODO: refactor to take account of conditional branches
-        public void Explore(OutputData output) {
-            if (_loop >= 0x100) {       // extremely (to say the least) infinite loop detection
+        public void CheckLoop() {
+            if (_loop >= 0x100) {       // extremely dumb (to say the least) infinite loop detection
                 throw new LoopEncounteredException();
             }
             _loop++;
+        }
+
+        internal void Close() {
+            Output.Close();
+        }
+
+        // TODO: refactor to take account of conditional branches
+        public void Explore() {
+            CheckLoop();
+            if (Pc != Origin) {
+                string routineIntro = $"\n;;\n;; Subroutine at ${Pc:X06}\n;;";
+                Routines.Add(Pc, routineIntro);
+                PrintLine(routineIntro);
+            }
             bool IsReturned = false;
             while (!Invalid && !IsReturned) {
                 int currPc = _pc;
                 bool alreadyPrinted = false;
-                byte curbyte = Rom.GetByte(Pc);
-                Opcode op = Opcodes[curbyte];
-                int size = op.Size;
-                if (op.Mode == AddressingMode.Immediate && size - 1 == 2) {
-                    size = op.Mnemonic[^1] switch {
-                        'A' => A16Bit ? 3 : 2,
-                        'X' => XY16Bit ? 3 : 2,
-                        'Y' => XY16Bit ? 3 : 2,
-                        _ => A16Bit ? 3 : 2
-                    };
-                    if (size == 3)
-                        op.SetOperand(Rom.GetWord(Pc + 1));
-                    else
-                        op.SetOperand(Rom.GetByte(Pc + 1));
-                } else {
-                    switch (size - 1) {
-                        case 0:
-                            break;
-                        case 1:
-                            op.SetOperand(Rom.GetByte(Pc + 1));
-                            break;
-                        case 2:
-                            op.SetOperand(Rom.GetWord(Pc + 1));
-                            break;
-                        case 3:
-                            op.SetOperand((int)Rom.GetLong(Pc + 1));
-                            break;
-                        default:
-                            throw new InvalidOperationException();
-                    }
-                }
-                if (op.Code == 0x00 || op.Code == 0x02 || op.Code == 0xDB)      // brk, cop, stp
-                    Invalid = true;
+                Opcode op = new Opcode(Opcodes[Rom.GetByte(Pc)]);
+                op.SetSize(Flags);
+                op.SetOperand(Rom, Pc);
+                Invalid = op.IsInvalid();
+                if (op.CanModifyMode())
+                    op.GetModifierFromOp().UpdateProcessorFlags(ref _flags, RomStack);
                 if (op.IsReturnable()) {
                     var returnable = op.GetReturnableFromOp(Pc);
                     alreadyPrinted = true;
-                    if (!Routines.ContainsKey(returnable.GetDestination())) {
-                        returnable.PushReturn(RomStack);
-                        returnable.UpdateDestination(Rom, ref _pc);
-                        string routineIntro = $"\n;;\n;; Subroutine at ${Rom.PcToSnes(Pc):X06}\n;;";
-                        Routines.Add(returnable.GetDestination(), routineIntro);
-                        PrintLine(output, op, currPc, size);
-                        PrintLine(output, routineIntro, Pc);
-                        Explore(output);
-                    } else {
-                        int oldPc = Pc;
-                        returnable.UpdateDestination(Rom, ref _pc);
-                        PrintLine(output, op, currPc, size);
+                    if (Routines.ContainsKey(Rom.SnesToPc(returnable.GetDestination()))) {
+                        int oldPc = Pc + op.Size;
+                        returnable.UpdateDestination(Rom, ref _pc);     // temporarily update the Pc for the Print
+                        PrintLine(op, currPc, op.Size);
                         Pc = oldPc;
-                        Pc += size;
+                    } else {
+                        returnable.PushReturn(RomStack).UpdateDestination(Rom, ref _pc);
+                        PrintLine(op, currPc, op.Size);
+                        Explore();
                     }
                 } else if (op.IsJumpable()) {
                     op.GetJumpableFromOp().UpdateDestination(Rom, ref _pc);
-                    PrintLine(output, op, currPc, size);
-                    alreadyPrinted = true;
-                } else if (op.IsIndirectJumpable()) {
-                    Pc += size;
-                    IsReturned = true;
-                } else if (op.IsReturning()) {
-                    alreadyPrinted = true;
-                    PrintLine(output, op, currPc, size);
-                    op.GetReturningFromOp(RomStack).Return(ref _pc);
-                    IsReturned = true;
                 } else {
-                    if (op.CanModifyMode()) {
-                        op.GetModifierFromOp().UpdateProcessorFlags(ref _flags, RomStack);
+                    IsReturned = op.IsIndirectJumpable() || op.IsReturning();
+                    if (op.IsReturning()) {
+                        op.GetReturningFromOp(RomStack).Return(ref _pc);
+                    } else {
+                        Pc += op.Size;
                     }
-                    Pc += size;
                 }
                 if (!alreadyPrinted)
-                    PrintLine(output, op, currPc, size);
+                    PrintLine(op, currPc, op.Size);
             }
         }
         // the printing functions are both bad and the logic in the whole thing is a bit fucked
-        private void PrintLine(OutputData output, string text, int currpc) {
-            output.WriteLine(text, currpc);
+        private void PrintLine(string text) {
+            Output.WriteLine(text, Pc);
         }
-        private void PrintLine(OutputData output, Opcode op, int currPc, int size) {
-            Label poss = new Label(currPc, Rom);
-            if (Labels.ContainsKey(poss))
-                output.WriteLine($"{poss}:", currPc);
+        private void PrintLine(Opcode op, int currPc, int size) {
+            if (Labels.ContainsKey(currPc))
+                Output.WriteLine($"{Labels[currPc]}:", currPc);
             if (op.IsBranchable()) {
-                int branchPc = op.IsJumpable() ? Pc : Pc + (sbyte)op.Operand;       // this is bad
-                Label label = new Label(branchPc, Rom);
-                if (!Labels.ContainsKey(label)) {     // if not found, use the new one
-                    Labels.Add(label, LabelType.Branchable);
-                    output.WriteLine($"\t{op.ToStringWithLabel(label),-20};${Rom.PcToSnes(currPc):X06}{"",-10}{Flags.FlagsToString()}", currPc);    // branch doesn't exist and points to a previous pc address, let's see if we can add it
-                    if (branchPc < currPc)
-                        output.WriteLineAtPc($"{label}:", branchPc);
+                int branchPc = op.IsJumpable() ? Pc : Pc + (sbyte)op.Operand;       // if it's BRA/BRL (aka jumpable) the Pc already got updated, if it isn't we need to update it now
+                if (Labels.ContainsKey(branchPc)) {     // if not found, use the new one
+                    Output.WriteLine($"\t{op.ToStringWithLabel(Labels[branchPc]),-20};${Rom.PcToSnes(currPc):X06}{"",-10}{Flags.FlagsToString()}", currPc);
                 } else {
-                    output.WriteLine($"\t{op.ToStringWithLabel(label),-20};${Rom.PcToSnes(currPc):X06}{"",-10}{Flags.FlagsToString()}", currPc);
+                    Label newLabel = new Label(branchPc, Rom);
+                    Labels.Add(branchPc, newLabel);
+                    Output.WriteLine($"\t{op.ToStringWithLabel(newLabel),-20};${Rom.PcToSnes(currPc):X06}{"",-10}{Flags.FlagsToString()}", currPc);    // branch doesn't exist and points to a previous pc address, let's see if we can add it
+                    if (branchPc < currPc)
+                        Output.WriteLineAtPc($"{newLabel}:", branchPc);
                 }
             } else if (op.IsJumpable() || op.IsReturnable()) {
                 Label label = new Label(Pc, Rom);
-                if (!Labels.ContainsKey(label)) {     // if not found, add the new one and use it
-                    Labels.Add(label, op.IsReturnable() ? LabelType.Returnable : LabelType.Jumpable);
+                if (!Labels.ContainsKey(Pc)) {     // if not found, add the new one and use it
+                    Labels.Add(Pc, label);
                 }
-                output.WriteLine($"\t{op.ToStringWithLabel(label),-20};${Rom.PcToSnes(currPc):X06}{"",-10}{Flags.FlagsToString()}", currPc);
+                Output.WriteLine($"\t{op.ToStringWithLabel(label),-20};${Rom.PcToSnes(currPc):X06}{"",-10}{Flags.FlagsToString()}", currPc);
             } else {
-                output.WriteLine($"\t{op.ToStringWithSize(size),-20};${Rom.PcToSnes(currPc):X06}{"",-10}{Flags.FlagsToString()}", currPc);
+                Output.WriteLine($"\t{op.ToStringWithSize(size),-20};${Rom.PcToSnes(currPc):X06}{"",-10}{Flags.FlagsToString()}", currPc);
             }
         }
     }

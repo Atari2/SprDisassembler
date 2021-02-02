@@ -10,20 +10,13 @@ namespace SprDisassembler {
                 return;
             }
             int entrypoint = Convert.ToInt32(args[1], 16);
-            Parser parser = new Parser(args[0], entrypoint);
-            OutputData output;
-            if (args.Length > 2) {
-                output = new OutputData(args[^1]);
-            } else {
-                output = new OutputData();
-            }
+            Parser parser = new Parser(args[0], entrypoint, args.Length > 2 ? args[^1] : null);
             try {
-                output.WriteLine($"\n;;\n;; Entrypoint at {entrypoint:X06}\n;;\n{new Label(parser.Pc, parser.Rom)}:", parser.Rom.SnesToPc(entrypoint));
-                parser.Explore(output);
-            } catch (InvalidOperationException) {
+                parser.Explore();
+                parser.Close();
+            } catch (LoopEncounteredException) {
                 Console.WriteLine("Recursion limit reached");
             }
-            output.Close();
         }
     }
 }

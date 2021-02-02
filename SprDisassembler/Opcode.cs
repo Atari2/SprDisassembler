@@ -31,147 +31,8 @@ namespace SprDisassembler {
         ImpliedAccumulator,
         BlockMove
     };
-
-    interface IJumpable {
-        static IEnumerable<string> Jumpables { get; }
-        int Destination { get; set; }
-        public abstract void UpdateDestination(Rom rom, ref int curpc);
-        public abstract int GetDestination();
-    }
-
-    interface IReturnable {
-        static IEnumerable<string> Returnables { get; }
-        int ReturnAddress { get; set; }
-        public abstract void PushReturn(Stack<byte> romStack);
-    }
-
-    interface ISwitchableMode {
-        static IEnumerable<string> Modifiers { get; }
-        Opcode op { get; set; }
-        public abstract void UpdateProcessorFlags(ref ProcessorFlags flags, Stack<byte> romStack);
-    }
-
-    class Jumpable : IJumpable {
-        private int _destination;
-        private string _mnemonic;
-        private Opcode op;
-        private static readonly string[] _jumpables = { "JMP", "JSL", "JML", "JSR", "BRA" };
-        private static readonly AddressingMode[] _modes = { AddressingMode.Relative, AddressingMode.RelativeLong, AddressingMode.Absolute, AddressingMode.AbsoluteLong };
-        public int Destination { get => _destination; set => _destination = value; }
-        public static IEnumerable<string> Jumpables { get => _jumpables; }
-        public static IEnumerable<AddressingMode> Modes { get => _modes; }
-
-        public Jumpable(Opcode op) {
-            this.op = op;
-            _mnemonic = op.Mnemonic;
-            if (Jumpables.Contains(op.Mnemonic))
-                Destination = op.Operand;
-            else
-                throw new InvalidOperationException();
-        }
-        public void UpdateDestination(Rom rom, ref int curpc) {
-            if (_mnemonic == _jumpables[^1]) {
-                curpc += (sbyte)_destination + 2;
-            } else if (op.Size == 3) {
-                curpc = (curpc & 0xFF0000) | (rom.SnesToPc(Destination) & 0x00FFFF);
-            } else {
-                curpc = rom.SnesToPc(Destination);
-            }
-        }
-
-        public int GetDestination() {
-            return Destination;
-        }
-    }
-
-    class Returnable : Jumpable, IReturnable {
-        private int _returnaddress;
-        private readonly string _mnemonic;
-        private static readonly string[] _returnables = { "JSL", "JSR" };
-        public int ReturnAddress { get => _returnaddress; set => _returnaddress = value; }
-        public static IEnumerable<string> Returnables { get => _returnables; }
-        public Returnable(Opcode op, int curpc) : base(op) {
-            if (Returnables.Contains(op.Mnemonic)) {
-                ReturnAddress = curpc + op.Size - 1;
-                _mnemonic = op.Mnemonic;
-            } else
-                throw new InvalidOperationException();
-        }
-
-        public void PushReturn(Stack<byte> romStack) {
-            int realReturn = _returnaddress + 1;
-            if (_mnemonic == _returnables[0]) {
-                romStack.Push((byte)((realReturn >> 16) & 0xFF));
-            }
-            romStack.Push((byte)((realReturn >> 8) & 0xFF));
-            romStack.Push((byte)(realReturn & 0xFF));
-        }
-    }
-
-    class ModifierMode : ISwitchableMode {
-        private readonly string _mnemonic;
-        private Opcode _op;
-        private static readonly string[] _modifiers = { "REP", "SEP", "PHP" };
-        public Opcode op { get => _op; set => _op = value; }
-        public static IEnumerable<string> Modifiers { get => _modifiers; }
-
-        public ModifierMode (Opcode op) {
-            if (Modifiers.Contains(op.Mnemonic)) {
-                _op = op;
-                _mnemonic = op.Mnemonic;
-            } else {
-                throw new InvalidOperationException();
-            }
-        }
-
-        public void UpdateProcessorFlags(ref ProcessorFlags flags, Stack<byte> romStack) {
-            if (_mnemonic == _modifiers[^1]) {
-                flags = ProcessorFlags.M | ProcessorFlags.X;        //(ProcessorFlags)romStack.Pop();, this just resets both A and X/Y to 8 bit, for no real reason
-            } else {
-                for (int i = 0; i < 8; i++) {
-                    byte val = (byte)((op.Operand & 0xFF) & (1 << i));
-                    if (_mnemonic == "REP") {
-                        flags = flags.UnSetFlag((ProcessorFlags)val);
-                    } else if (_mnemonic == "SEP") {
-                        flags = flags.SetFlag((ProcessorFlags)val);
-                    }
-                }
-            }
-        }
-    }
-
-
-    class Returning {
-        private readonly string _mnemonic;
-        private static readonly string[] _returning = { "RTL", "RTS", "RTI" };
-        private Stack<byte> RomStack { get; set; }
-        public static IEnumerable<string> ReturningOps { get => _returning; }
-
-        public Returning(Opcode op, Stack<byte> romStack) {
-            if (ReturningOps.Contains(op.Mnemonic)) {
-                RomStack = romStack;
-                _mnemonic = op.Mnemonic;
-            } else
-                throw new InvalidOperationException();
-        }
-
-        public void Return(ref int curpc) {
-            try {
-                byte low = RomStack.Pop();
-                byte high = RomStack.Pop();
-                if (_mnemonic != _returning[1]) {
-                    byte bank = RomStack.Pop();
-                    curpc = (bank << 16) | (high << 8) | (low);
-                } else {
-                    curpc = (curpc & 0xFF0000) | (high << 8) | (low);
-                }
-            } catch (InvalidOperationException) {
-                return;
-            }
-        }
-    }
     
-    record Opcode {
+    class Opcode {
         public int Size;
         public int Code { get; set; }
         public int Operand { get; set; }
@@ -185,13 +46,26 @@ namespace SprDisassembler {
             Mnemonic = mnemonic;
         }
 
-        public void SetOperand (int operand) {
-            Operand = operand;
+        public Opcode(Opcode origin) {
+            Size = origin.Size;
+            Mode = origin.Mode;
+            Code = origin.Code;
+            Mnemonic = origin.Mnemonic;
+        }
+
+        public void SetOperand (Rom rom, int pc) {
+            Operand = (Size - 1) switch {
+                0 => 0,
+                1 => rom.GetByte(pc + 1),
+                2 => rom.GetWord(pc + 1),
+                3 => (int)rom.GetLong(pc + 1),
+                _ => throw new InvalidSizeException()
+            };
         }
 
         public override string ToString() {
             StringBuilder builder = new StringBuilder(Mnemonic.ToUpper());
-            if (Mode != AddressingMode.Immediate && Mode != AddressingMode.Relative) {
+            if (Mode != AddressingMode.Immediate && Mode != AddressingMode.Relative && Mode != AddressingMode.RelativeLong) {
                 builder.Append((Size - 1) switch {
                     0 => "",
                     1 => ".b ",
@@ -202,7 +76,7 @@ namespace SprDisassembler {
             } else {
                 builder.Append(' ');
             }
-            while (builder.Length < 6)
+            while (builder.Length < 6)      // padding
                 builder.Append(' ');
             string codeStr;
             if (Mode != AddressingMode.BlockMove) {
@@ -249,6 +123,31 @@ namespace SprDisassembler {
             return ret;
         }
 
+        public string ToStringWithLabel(Label label) {
+            return ToString().Split()[0] + $" {label}";
+        }
+
+        public void SetSize(ProcessorFlags flags) {
+            Size = GetSize(flags);
+        }
+
+        public int GetSize(ProcessorFlags flags) {
+            if (Mode == AddressingMode.Immediate && Size - 1 == 2) {
+                return Mnemonic[^1] switch {
+                    'A' => flags.IsFlagClear(ProcessorFlags.M) ? 3 : 2,
+                    'X' => flags.IsFlagClear(ProcessorFlags.X) ? 3 : 2,
+                    'Y' => flags.IsFlagClear(ProcessorFlags.X) ? 3 : 2,
+                    _ => flags.IsFlagClear(ProcessorFlags.M) ? 3 : 2
+                };
+            } else {
+                return Size;
+            }
+        }
+
+        public bool IsInvalid() {
+            return Code == 0x00 || Code == 0x02 || Code == 0xDB;
+        }
+
         public bool IsBranchable() {
             return Mode == AddressingMode.Relative || Mode == AddressingMode.RelativeLong;
         }
@@ -272,6 +171,10 @@ namespace SprDisassembler {
 
         public bool CanModifyMode() {
             return ModifierMode.Modifiers.Contains(Mnemonic);
+        }
+
+        public bool IsActionable() {
+            return IsBranchable() || IsJumpable() || IsIndirectJumpable() || IsReturnable() || IsReturning() || CanModifyMode();
         }
 
         public Jumpable GetJumpableFromOp() {
@@ -302,9 +205,6 @@ namespace SprDisassembler {
                 throw new InvalidOperationException();
         }
 
-        public string ToStringWithLabel(Label label) {
-            return ToString().Split()[0] + $" {label}";
-        }
 
     }
 }
