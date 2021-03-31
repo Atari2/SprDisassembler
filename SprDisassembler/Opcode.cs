@@ -34,12 +34,12 @@ namespace SprDisassembler {
     
     class Opcode {
         public int Size;
-        public int Code { get; set; }
+        public byte Code { get; set; }
         public int Operand { get; set; }
         public readonly string Mnemonic;
         public AddressingMode Mode { get; set; }
 
-        public Opcode(int size, AddressingMode mode, int code, string mnemonic) {
+        public Opcode(int size, byte code, string mnemonic, AddressingMode mode) {
             Size = size;
             Mode = mode;
             Code = code;
